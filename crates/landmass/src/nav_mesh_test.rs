@@ -11,7 +11,7 @@ use crate::{
   util::BoundingBox,
 };
 
-use super::{NavigationMesh, ValidationError};
+use super::{NavigationMesh, ValidNavigationMesh, ValidationError};
 
 #[test]
 fn validation_computes_bounds() {
@@ -609,6 +609,73 @@ fn sample_point_in_nodes() {
       .map(|(point, node)| ((point * 1000.0).round() / 1000.0, node)),
     Some((Vec3::new(2.5, 4.5, 0.5), 2))
   );
+}
+
+/// Sampling through the polygon hierarchy must answer exactly as a scan over
+/// every polygon does, ties included, across a mesh with slopes and steps.
+#[test]
+fn sample_point_through_the_hierarchy_matches_a_full_scan() {
+  const SIDE: usize = 24;
+  let mut vertices = Vec::new();
+  for y in 0..=SIDE {
+    for x in 0..=SIDE {
+      // A slope along x and a one-unit step every eight rows along y.
+      let height = x as f32 * 0.1 + (y / 8) as f32;
+      vertices.push(Vec3::new(x as f32, y as f32, height));
+    }
+  }
+  let index = |x: usize, y: usize| y * (SIDE + 1) + x;
+  let mut polygons = Vec::new();
+  for y in 0..SIDE {
+    for x in 0..SIDE {
+      polygons.push(vec![
+        index(x, y),
+        index(x + 1, y),
+        index(x + 1, y + 1),
+        index(x, y + 1),
+      ]);
+    }
+  }
+  let polygon_type_indices = vec![0; polygons.len()];
+  let mesh = NavigationMesh::<XYZ> {
+    vertices,
+    polygons,
+    polygon_type_indices,
+    height_mesh: None,
+  }
+  .validate()
+  .expect("Mesh is valid.");
+
+  let distance = CorePointSampleDistance {
+    horizontal_distance: 0.75,
+    distance_below: 1.5,
+    distance_above: 0.5,
+    vertical_preference_ratio: 2.0,
+  };
+  let mut sampled = 0;
+  for step_y in -8..=(SIDE as i32 * 4 + 8) {
+    for step_x in -8..=(SIDE as i32 * 4 + 8) {
+      for lift in [-0.8, 0.0, 0.3, 1.2] {
+        let x = step_x as f32 * 0.25;
+        let y = step_y as f32 * 0.25;
+        let point = Vec3::new(x, y, x * 0.1 + (y / 8.0).floor() + lift);
+        let sample_box =
+          ValidNavigationMesh::<XYZ>::sample_box(point, &distance);
+        let full_scan = mesh.sample_point_among(
+          point,
+          &distance,
+          &sample_box,
+          0..mesh.polygons.len(),
+        );
+        let through_hierarchy = mesh.sample_point(point, &distance);
+        assert_eq!(through_hierarchy, full_scan, "at {point:?}");
+        sampled += usize::from(full_scan.is_some());
+      }
+    }
+  }
+  // Points on and near the mesh have to be most of them, or the comparison
+  // only covered misses.
+  assert!(sampled > 20_000, "only {sampled} points sampled the mesh");
 }
 
 #[test]

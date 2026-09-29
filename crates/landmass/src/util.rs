@@ -367,7 +367,7 @@ impl<CS: CoordinateSystem> Transform<CS> {
   }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) enum BoundingBoxHierarchy<ValueType> {
   Leaf {
     bounds: BoundingBox,

@@ -396,9 +396,19 @@ impl<CS: CoordinateSystem> NavigationMesh<CS> {
       }
     }
 
+    let polygon_bvh = (!polygons.is_empty()).then(|| {
+      let mut values = polygons
+        .iter()
+        .enumerate()
+        .map(|(index, polygon)| (polygon.bounds, Some(index)))
+        .collect::<Vec<_>>();
+      BoundingBoxHierarchy::new(&mut values)
+    });
+
     Ok(ValidNavigationMesh {
       mesh_bounds,
       polygons,
+      polygon_bvh,
       vertices,
       boundary_edges,
       height_mesh,
@@ -488,6 +498,10 @@ pub struct ValidNavigationMesh<CS: CoordinateSystem> {
   pub(crate) vertices: Vec<Vec3>,
   /// The polygons of the mesh.
   pub(crate) polygons: Vec<ValidPolygon>,
+  /// A hierarchy over the bounds of `polygons`, holding their indices, so a
+  /// point query only visits the polygons near it. `None` when there are no
+  /// polygons.
+  pub(crate) polygon_bvh: Option<BoundingBoxHierarchy<usize>>,
   /// The boundary edges in the navigation mesh. Edges are stored as pairs of
   /// vertices in a counter-clockwise direction. That is, moving along an edge
   /// (e.0, e.1) from e.0 to e.1 will move counter-clockwise along the
@@ -527,6 +541,7 @@ impl<CS: CoordinateSystem> Clone for ValidNavigationMesh<CS> {
       mesh_bounds: self.mesh_bounds,
       vertices: self.vertices.clone(),
       polygons: self.polygons.clone(),
+      polygon_bvh: self.polygon_bvh.clone(),
       boundary_edges: self.boundary_edges.clone(),
       height_mesh: self.height_mesh.clone(),
       marker: self.marker,
@@ -541,6 +556,7 @@ impl<CS: CoordinateSystem> std::fmt::Debug for ValidNavigationMesh<CS> {
       .field("mesh_bounds", &self.mesh_bounds)
       .field("vertices", &self.vertices)
       .field("polygons", &self.polygons)
+      .field("polygon_bvh", &self.polygon_bvh)
       .field("boundary_edges", &self.boundary_edges)
       .field("height_mesh", &self.height_mesh)
       .field("marker", &self.marker)
@@ -616,7 +632,29 @@ impl<CS: CoordinateSystem> ValidNavigationMesh<CS> {
     point: Vec3,
     point_sample_distance: &CorePointSampleDistance,
   ) -> Option<(Vec3, usize)> {
-    let sample_box = BoundingBox::new_box(
+    let sample_box = Self::sample_box(point, point_sample_distance);
+    let mut candidates = self
+      .polygon_bvh
+      .as_ref()
+      .map(|bvh| bvh.query_box(sample_box).into_iter().copied().collect())
+      .unwrap_or_else(Vec::new);
+    // In index order, so a tie resolves to the lowest index exactly as a scan
+    // over every polygon would.
+    candidates.sort_unstable();
+    self.sample_point_among(
+      point,
+      point_sample_distance,
+      &sample_box,
+      candidates.into_iter(),
+    )
+  }
+
+  /// The box around `point` that a polygon must intersect to be sampled.
+  fn sample_box(
+    point: Vec3,
+    point_sample_distance: &CorePointSampleDistance,
+  ) -> BoundingBox {
+    BoundingBox::new_box(
       point
         + Vec3::new(
           -point_sample_distance.horizontal_distance,
@@ -629,8 +667,18 @@ impl<CS: CoordinateSystem> ValidNavigationMesh<CS> {
           point_sample_distance.horizontal_distance,
           point_sample_distance.distance_above,
         ),
-    );
+    )
+  }
 
+  /// Samples `point` against the polygons in `candidates`, visited in the
+  /// order given. Polygons outside `sample_box` are skipped.
+  fn sample_point_among(
+    &self,
+    point: Vec3,
+    point_sample_distance: &CorePointSampleDistance,
+    sample_box: &BoundingBox,
+    candidates: impl Iterator<Item = usize>,
+  ) -> Option<(Vec3, usize)> {
     fn project_to_triangle(triangle: (Vec3, Vec3, Vec3), point: Vec3) -> Vec3 {
       let triangle_deltas = (
         triangle.1 - triangle.0,
@@ -666,7 +714,8 @@ impl<CS: CoordinateSystem> ValidNavigationMesh<CS> {
 
     let mut best_node = None;
 
-    for (polygon_index, polygon) in self.polygons.iter().enumerate() {
+    for polygon_index in candidates {
+      let polygon = &self.polygons[polygon_index];
       if !sample_box.intersects_bounds(&polygon.bounds) {
         continue;
       }

@@ -4,6 +4,10 @@
 
 ### Features
 
+- Point sampling (agent, character and target positions) now finds candidate
+  polygons through a bounding box hierarchy instead of checking every polygon
+  of every island, with identical results.
+
 ### Migration Guide
 
 ## `landmass_rerecast` 0.3.0 - 2026-08-09
